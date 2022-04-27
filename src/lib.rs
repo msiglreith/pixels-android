@@ -1,13 +1,11 @@
 #![deny(clippy::all)]
-#![forbid(unsafe_code)]
 
 use log::error;
-use pixels::{Error, Pixels, SurfaceTexture};
+use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
-use winit::event::{Event, VirtualKeyCode};
+use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
-use winit_input_helper::WinitInputHelper;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
@@ -23,15 +21,60 @@ struct World {
 
 #[cfg_attr(
     target_os = "android",
-    ndk_glue::main(backtrace = "on", logger(tag = "pixels-android"))
+    ndk_glue::main(backtrace = "on", logger(tag = "pixels-android", level = "info"))
 )]
 fn main() {
     run().unwrap();
 }
 
-fn run() -> Result<(), Error> {
+fn show_soft_input() {
+    let ctx = ndk_glue::native_activity();
+
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.unwrap();
+    let env = vm.attach_current_thread().unwrap();
+
+    let class_ctxt = env.find_class("android/content/Context").unwrap();
+    let ime = env
+        .get_static_field(class_ctxt, "INPUT_METHOD_SERVICE", "Ljava/lang/String;")
+        .unwrap();
+    let ime_manager = env
+        .call_method(
+            ctx.activity(),
+            "getSystemService",
+            "(Ljava/lang/String;)Ljava/lang/Object;",
+            &[ime],
+        )
+        .unwrap()
+        .l()
+        .unwrap();
+
+    let jni_window = env
+        .call_method(ctx.activity(), "getWindow", "()Landroid/view/Window;", &[])
+        .unwrap()
+        .l()
+        .unwrap();
+    let view = env
+        .call_method(jni_window, "getDecorView", "()Landroid/view/View;", &[])
+        .unwrap()
+        .l()
+        .unwrap();
+
+    let result = env
+        .call_method(
+            ime_manager,
+            "showSoftInput",
+            "(Landroid/view/View;I)Z",
+            &[view.into(), 0i32.into()],
+        )
+        .unwrap()
+        .z()
+        .unwrap();
+
+    log::info!("show input: {}", result);
+}
+
+fn run() -> anyhow::Result<()> {
     let event_loop = EventLoop::new();
-    let mut input = WinitInputHelper::new();
     let window = {
         let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
         WindowBuilder::new()
@@ -42,15 +85,19 @@ fn run() -> Result<(), Error> {
             .unwrap()
     };
 
-    let mut pixels = None;
+    let mut pixels: Option<Pixels> = None;
     let mut world = World::new();
 
     event_loop.run(move |event, _, control_flow| {
+        control_flow.set_poll();
+
         if let Event::Resumed = event {
             log::info!("resumed");
+
             pixels = Some({
                 let window_size = window.inner_size();
-                let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+                let surface_texture =
+                    SurfaceTexture::new(window_size.width, window_size.height, &window);
                 Pixels::new(WIDTH, HEIGHT, surface_texture).unwrap()
             });
         }
@@ -61,34 +108,44 @@ fn run() -> Result<(), Error> {
 
         if let Some(pixels) = pixels.as_mut() {
             // Draw the current frame
-            if let Event::RedrawRequested(_) = event {
-                world.draw(pixels.get_frame());
-                if pixels
-                    .render()
-                    .map_err(|e| error!("pixels.render() failed: {}", e))
-                    .is_err()
-                {
+            match event {
+                Event::RedrawRequested(_) => {
+                    world.draw(pixels.get_frame());
+                    if pixels
+                        .render()
+                        .map_err(|e| error!("pixels.render() failed: {}", e))
+                        .is_err()
+                    {
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
+                }
+                Event::MainEventsCleared => {
+                    // Update internal state and request a redraw
+                    world.update();
+                    window.request_redraw();
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => {
                     *control_flow = ControlFlow::Exit;
-                    return;
-                }
-            }
-
-            // Handle input events
-            if input.update(&event) {
-                // Close events
-                if input.key_pressed(VirtualKeyCode::Escape) || input.quit() {
-                    *control_flow = ControlFlow::Exit;
-                    return;
                 }
 
-                // Resize the window
-                if let Some(size) = input.window_resized() {
-                    pixels.resize_surface(size.width, size.height);
+                Event::WindowEvent {
+                    event: WindowEvent::Touch(_),
+                    ..
+                } => {
+                    show_soft_input();
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::KeyboardInput { input, .. },
+                    ..
+                } => {
+                    log::info!("input: {:?}", input);
                 }
 
-                // Update internal state and request a redraw
-                world.update();
-                window.request_redraw();
+                _ => (),
             }
         }
     });
