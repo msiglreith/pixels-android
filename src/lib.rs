@@ -3,7 +3,7 @@
 use log::error;
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{Event, TouchPhase, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
@@ -27,7 +27,7 @@ fn main() {
     run().unwrap();
 }
 
-fn show_soft_input() {
+fn show_soft_input(show: bool) -> bool {
     let ctx = ndk_glue::native_activity();
 
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.unwrap();
@@ -59,18 +59,38 @@ fn show_soft_input() {
         .l()
         .unwrap();
 
-    let result = env
-        .call_method(
-            ime_manager,
-            "showSoftInput",
-            "(Landroid/view/View;I)Z",
-            &[view.into(), 0i32.into()],
-        )
-        .unwrap()
-        .z()
-        .unwrap();
-
-    log::info!("show input: {}", result);
+    if show {
+        let result = env
+            .call_method(
+                ime_manager,
+                "showSoftInput",
+                "(Landroid/view/View;I)Z",
+                &[view.into(), 0i32.into()],
+            )
+            .unwrap()
+            .z()
+            .unwrap();
+        log::info!("show input: {}", result);
+        result
+    } else {
+        let window_token = env
+            .call_method(view, "getWindowToken", "()Landroid/os/IBinder;", &[])
+            .unwrap()
+            .l()
+            .unwrap();
+        let result = env
+            .call_method(
+                ime_manager,
+                "hideSoftInputFromWindow",
+                "(Landroid/os/IBinder;I)Z",
+                &[window_token.into(), 0i32.into()],
+            )
+            .unwrap()
+            .z()
+            .unwrap();
+        log::info!("hide input: {}", result);
+        result
+    }
 }
 
 fn run() -> anyhow::Result<()> {
@@ -87,6 +107,8 @@ fn run() -> anyhow::Result<()> {
 
     let mut pixels: Option<Pixels> = None;
     let mut world = World::new();
+
+    let mut soft_keyboard = false;
 
     event_loop.run(move |event, _, control_flow| {
         control_flow.set_poll();
@@ -133,10 +155,14 @@ fn run() -> anyhow::Result<()> {
                 }
 
                 Event::WindowEvent {
-                    event: WindowEvent::Touch(_),
+                    event: WindowEvent::Touch(touch),
                     ..
                 } => {
-                    show_soft_input();
+                    if touch.phase == TouchPhase::Started {
+                        // toggle software keyboard
+                        soft_keyboard = !soft_keyboard;
+                        show_soft_input(soft_keyboard);
+                    }
                 }
                 Event::WindowEvent {
                     event: WindowEvent::KeyboardInput { input, .. },
